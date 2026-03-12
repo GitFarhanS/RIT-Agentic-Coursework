@@ -1,12 +1,6 @@
 """
 Rotman Interactive Trader (RIT) REST API client.
-
-Aligns with the RIT API documentation (e.g. ritc.readthedocs.io):
-- Case, trader, limits, assets, securities, order book, OHLC, time & sales
-- Orders (get, place, cancel single or bulk)
-- Tenders (list, accept, decline)
-- Leases (list, create, delete)
-- News
+Case, limits, securities (book, TAS), orders, tenders.
 """
 
 from __future__ import annotations
@@ -21,11 +15,6 @@ from utilities import (
     TenderOrder,
     Level,
     OrderBook,
-    Order,
-    Case,
-    Trader,
-    TradingLimit,
-    News,
 )
 
 
@@ -60,7 +49,7 @@ class RotmanSDK:
     Client for the Rotman Interactive Trader REST API.
 
     Usage:
-        client = RotmanSDK(API_KEY="...", HOST="http://host:9999/v1")
+        client = RotmanSDK(API_KEY="TPIAOJIF", HOST="http://host:9999/v1")
         case = client.get_case()
         securities = client.get_securities()
         book = client.get_securities_book(ticker="ALGO")
@@ -134,99 +123,20 @@ class RotmanSDK:
         """Get current case/session (name, tick, status, period, etc.)."""
         return self._get("/case")
 
-    def get_case_typed(self) -> Case:
-        """Get current case as a Case dataclass."""
-        return Case.from_api(self.get_case())
-
     def get_tick(self) -> int:
         """Current simulation tick; 0 if stopped."""
         case = self.get_case()
-        if isinstance(case, dict):
-            return int(case.get("tick", 0) or 0)
-        return 0
+        return int(case.get("tick", 0) or 0) if isinstance(case, dict) else 0
 
-    def get_trader(self) -> dict[str, Any]:
-        """Get currently logged-in trader."""
-        return self._get("/trader")
-
-    def get_trader_typed(self) -> Trader:
-        """Get current trader as a Trader dataclass."""
-        return Trader.from_api(self.get_trader())
+    def check_api_key(self) -> bool:
+        """Confirm API key works by calling get_case(). Returns True or raises RITError."""
+        self.get_case()
+        return True
 
     def get_limits(self) -> list[dict[str, Any]]:
         """Get trading/exposure limits for the case."""
         raw = self._get("/limits")
         return raw if isinstance(raw, list) else [raw] if raw else []
-
-    def get_limits_typed(self) -> list[TradingLimit]:
-        """Get limits as list of TradingLimit dataclasses."""
-        return [TradingLimit.from_api(d) for d in self.get_limits()]
-
-    # ----- Assets -----
-
-    def get_assets(self, ticker: Optional[str] = None) -> list[dict[str, Any]]:
-        """Get list of available assets; optionally filter by ticker."""
-        raw = self._get("/assets", params={"ticker": ticker})
-        return raw if isinstance(raw, list) else [raw] if raw else []
-
-    def get_assets_history(
-        self,
-        ticker: Optional[str] = None,
-        period: Optional[int] = None,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """Get asset activity log (RIT API v1.0.3+)."""
-        raw = self._get(
-            "/assets/history",
-            params={"ticker": ticker, "period": period, "limit": limit},
-        )
-        return raw if isinstance(raw, list) else []
-
-    def get_leases(self, lease_id: Optional[int] = None) -> Any:
-        """
-        List all leases, or get a single lease by id.
-        Returns list of lease dicts, or one dict if lease_id is set.
-        """
-        if lease_id is not None:
-            return self._get(f"/leases/{lease_id}")
-        return self._get("/leases") or []
-
-    def delete_leases(self, lease_id: int) -> dict[str, Any]:
-        """Unlease an asset by its lease id."""
-        return self._delete(f"/leases/{lease_id}") or {}
-
-    def post_leases(
-        self,
-        ticker: str,
-        *,
-        lease_id: Optional[int] = None,
-        from1: Optional[str] = None,
-        quantity1: Optional[float] = None,
-        from2: Optional[str] = None,
-        quantity2: Optional[float] = None,
-        from3: Optional[str] = None,
-        quantity3: Optional[float] = None,
-    ) -> dict[str, Any]:
-        """
-        Lease or use an asset. For refineries etc. pass from1, quantity1, ...
-        See RIT API docs for asset-specific parameters.
-        """
-        params: dict[str, Any] = {"ticker": ticker}
-        if lease_id is not None:
-            params["id"] = lease_id
-        if from1 is not None:
-            params["from1"] = from1
-        if quantity1 is not None:
-            params["quantity1"] = quantity1
-        if from2 is not None:
-            params["from2"] = from2
-        if quantity2 is not None:
-            params["quantity2"] = quantity2
-        if from3 is not None:
-            params["from3"] = from3
-        if quantity3 is not None:
-            params["quantity3"] = quantity3
-        return self._post("/leases", params=params)
 
     # ----- Securities -----
 
@@ -246,32 +156,6 @@ class RotmanSDK:
         asks = [Level.from_api(a) for a in raw.get("asks", [])]
         return OrderBook(bids=bids, asks=asks)
 
-    def get_book(self, ticker: str, limit: int = 20) -> OrderBook:
-        """Alias for get_securities_book."""
-        return self.get_securities_book(ticker=ticker, limit=limit)
-
-    def get_securities_history(
-        self,
-        ticker: str,
-        period: Optional[int] = None,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """Get OHLC history for a security."""
-        raw = self._get(
-            "/securities/history",
-            params={"ticker": ticker, "period": period, "limit": limit},
-        )
-        return raw if isinstance(raw, list) else []
-
-    def get_ohlc(
-        self,
-        ticker: str,
-        period: Optional[int] = None,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """Alias for get_securities_history."""
-        return self.get_securities_history(ticker=ticker, period=period, limit=limit)
-
     def get_securities_tas(
         self,
         ticker: str,
@@ -280,15 +164,8 @@ class RotmanSDK:
         period: Optional[int] = None,
         limit: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Get time-and-sales (tick) history for a security. Use after=id for incremental."""
-        params: dict[str, Any] = {"ticker": ticker}
-        if after is not None:
-            params["after"] = after
-        if period is not None:
-            params["period"] = period
-        if limit is not None:
-            params["limit"] = limit
-        raw = self._get("/securities/tas", params=params)
+        """Time-and-sales (tick) history. Use after=id for incremental."""
+        raw = self._get("/securities/tas", params={"ticker": ticker, "after": after, "period": period, "limit": limit})
         return raw if isinstance(raw, list) else []
 
     # ----- Positions (convenience) -----
@@ -317,14 +194,6 @@ class RotmanSDK:
                 return None
             raise
 
-    def get_all_orders(self, status: Optional[str] = None) -> list[dict[str, Any]]:
-        """Alias for get_orders."""
-        return self.get_orders(status=status)
-
-    def get_specific_order(self, order_id: int) -> Optional[dict[str, Any]]:
-        """Alias for get_order."""
-        return self.get_order(order_id)
-
     def place_order(
         self,
         ticker: str,
@@ -350,17 +219,6 @@ class RotmanSDK:
             params["price"] = price
         return self._post("/orders", params=params)
 
-    def post_orders(
-        self,
-        ticker: str,
-        order_type: OrderType,
-        quantity: int,
-        action: ActionEnum,
-        price: Optional[float] = None,
-    ) -> dict[str, Any]:
-        """Alias for place_order (RIT-style name)."""
-        return self.place_order(ticker, order_type, quantity, action, price)
-
     def cancel_order(self, order_id: int) -> dict[str, Any]:
         """Cancel a single order by id."""
         try:
@@ -369,10 +227,6 @@ class RotmanSDK:
             if e.status_code == 404:
                 return {"success": False}
             raise
-
-    def delete_orders(self, order_id: int) -> dict[str, Any]:
-        """Alias for cancel_order (RIT-style name)."""
-        return self.cancel_order(order_id)
 
     def cancel_orders(
         self,
@@ -398,24 +252,6 @@ class RotmanSDK:
         """Cancel all open orders. Alias for cancel_orders(all=True)."""
         return self.cancel_orders(all=True)
 
-    # ----- Order helpers -----
-
-    def buy_market(self, ticker: str, quantity: int) -> dict[str, Any]:
-        return self.place_order(ticker, OrderType.MARKET, quantity, ActionEnum.BUY)
-
-    def sell_market(self, ticker: str, quantity: int) -> dict[str, Any]:
-        return self.place_order(ticker, OrderType.MARKET, quantity, ActionEnum.SELL)
-
-    def buy_limit(self, ticker: str, quantity: int, limit_price: float) -> dict[str, Any]:
-        return self.place_order(
-            ticker, OrderType.LIMIT, quantity, ActionEnum.BUY, price=limit_price
-        )
-
-    def sell_limit(self, ticker: str, quantity: int, limit_price: float) -> dict[str, Any]:
-        return self.place_order(
-            ticker, OrderType.LIMIT, quantity, ActionEnum.SELL, price=limit_price
-        )
-
     # ----- Tenders -----
 
     def get_tenders(self) -> Optional[list[TenderOrder]]:
@@ -425,12 +261,8 @@ class RotmanSDK:
             return None
         return [TenderOrder.from_api(t) for t in raw]
 
-    def accept_tender(self, tender_id: int) -> dict[str, Any]:
-        """Accept a tender by id."""
-        return self._post(f"/tenders/{tender_id}") or {}
-
-    def post_tenders(self, tender_id: int, price: Optional[float] = None) -> dict[str, Any]:
-        """Alias for accept_tender (RIT-style). Some APIs require price for non-fixed tenders."""
+    def accept_tender(self, tender_id: int, price: Optional[float] = None) -> dict[str, Any]:
+        """Accept a tender by id. Pass price for non-fixed-bid tenders if required."""
         params: dict[str, Any] = {}
         if price is not None:
             params["price"] = price
@@ -446,55 +278,3 @@ class RotmanSDK:
                 return {"success": False}
             raise
 
-    def delete_tenders(self, tender_id: int) -> dict[str, Any]:
-        """Alias for decline_tender (RIT-style name)."""
-        return self.decline_tender(tender_id)
-
-    def easy_accept_tender(self) -> Optional[TenderOrder]:
-        """Accept the first available tender if any; returns that TenderOrder or None."""
-        tenders = self.get_tenders()
-        if not tenders:
-            return None
-        t = tenders[0]
-        result = self.accept_tender(t.id)
-        return t if result.get("success") else None
-
-    def easy_decline_tender(self) -> Optional[dict[str, Any]]:
-        """Decline the first available tender; returns {'tender_id': id} or None."""
-        tenders = self.get_tenders()
-        if not tenders:
-            return None
-        ok = self.decline_tender(tenders[0].id).get("success", False)
-        return {"tender_id": tenders[0].id} if ok else None
-
-    # ----- News -----
-
-    def get_news(
-        self,
-        *,
-        since: Optional[int] = None,
-        after: Optional[int] = None,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Get recent news. Use since=news_id or after=news_id (API version dependent).
-        """
-        params: dict[str, Any] = {}
-        if since is not None:
-            params["since"] = since
-        if after is not None:
-            params["after"] = after
-        if limit is not None:
-            params["limit"] = limit
-        raw = self._get("/news", params=params or None)
-        return raw if isinstance(raw, list) else []
-
-    def get_news_typed(
-        self,
-        *,
-        since: Optional[int] = None,
-        after: Optional[int] = None,
-        limit: Optional[int] = None,
-    ) -> list[News]:
-        """Get news as list of News dataclasses."""
-        return [News.from_api(n) for n in self.get_news(since=since, after=after, limit=limit)]

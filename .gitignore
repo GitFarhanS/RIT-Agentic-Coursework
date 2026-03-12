@@ -11,3 +11,7 @@ __pycache__/
 *.pyzwzw
 *.pyzwzwzw
 *.pyzwzwzwzw
+
+# Local-only (do not push)
+local_docs/
+local_files/
