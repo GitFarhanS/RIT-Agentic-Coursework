@@ -15,3 +15,5 @@ __pycache__/
 # Local-only (do not push)
 local_docs/
 local_files/
+.env
+VM files/

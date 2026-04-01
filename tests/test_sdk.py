@@ -2,8 +2,8 @@
 Tests for sdk.RotmanSDK and sdk.RITError.
 
 - Unit tests (no network): RITError, SDK init, validation (e.g. LIMIT price, cancel_orders args).
-- Live tests: require RIT_API_KEY (and optionally RIT_HOST) in the environment; skip if unset or API unreachable.
-  Run with: RIT_API_KEY=your_key [RIT_HOST=http://host:9999/v1] pytest tests/test_sdk.py -v
+- Live tests: use API key from .env (API_KEY or RIT_API_KEY); skip if unset or API unreachable.
+  Ensure .env contains API_KEY=your_key (and optionally RIT_HOST=...). Then: pytest tests/test_sdk.py -v
 """
 
 from __future__ import annotations
@@ -18,6 +18,27 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+
+def _load_dotenv():
+    """Load .env from project root; set RIT_API_KEY from API_KEY if present."""
+    env_file = _root / ".env"
+    if not env_file.is_file():
+        return
+    with open(env_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key and value:
+                os.environ.setdefault(key, value)
+                if key == "API_KEY" and "RIT_API_KEY" not in os.environ:
+                    os.environ["RIT_API_KEY"] = value
+
+
+_load_dotenv()
+
 import pytest
 
 from sdk import RITError, RotmanSDK
@@ -29,8 +50,8 @@ from utilities import ActionEnum, OrderType
 # ---------------------------------------------------------------------------
 
 def _get_live_client():
-    """Create SDK client from env. Returns None if RIT_API_KEY not set."""
-    key = os.environ.get("RIT_API_KEY", "TPIAOJIF").strip()
+    """Create SDK client from .env / env (RIT_API_KEY). Returns None if not set."""
+    key = os.environ.get("RIT_API_KEY", "").strip()
     if not key:
         return None
     host = os.environ.get("RIT_HOST", "http://192.168.64.9:9999/v1").strip()
