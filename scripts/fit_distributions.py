@@ -132,8 +132,37 @@ def fit_models(
     tender_spread_lognorm: dict[str, Any] = {}
 
     if not tenders.empty and "source_file" in tenders.columns and "Tick" in tenders.columns:
+        tenders_fit = tenders.copy()
+        if (
+            not book.empty
+            and {"source_file", "tick", "ticker", "mid"}.issubset(book.columns)
+            and {"source_file", "Tick", "Ticker"}.issubset(tenders_fit.columns)
+        ):
+            mid_df = (
+                book[["source_file", "tick", "ticker", "mid"]]
+                .dropna(subset=["source_file", "tick", "ticker", "mid"])
+                .copy()
+            )
+            mid_df["source_file"] = mid_df["source_file"].astype(str)
+            mid_df["tick"] = pd.to_numeric(mid_df["tick"], errors="coerce")
+            mid_df = mid_df[mid_df["tick"].notna()]
+            mid_df["tick"] = mid_df["tick"].astype(int)
+            mid_df["ticker"] = mid_df["ticker"].astype(str).str.upper()
+
+            tenders_fit["source_file"] = tenders_fit["source_file"].astype(str)
+            tenders_fit["Tick"] = pd.to_numeric(tenders_fit["Tick"], errors="coerce")
+            tenders_fit = tenders_fit[tenders_fit["Tick"].notna()].copy()
+            tenders_fit["Tick"] = tenders_fit["Tick"].astype(int)
+            tenders_fit["Ticker"] = tenders_fit["Ticker"].astype(str).str.upper()
+
+            tenders_fit = tenders_fit.merge(
+                mid_df.rename(columns={"tick": "Tick", "ticker": "Ticker", "mid": "mid_at_tick"}),
+                on=["source_file", "Tick", "Ticker"],
+                how="left",
+            )
+
         inter_list: list[int] = []
-        for _, g in tenders.groupby("source_file"):
+        for _, g in tenders_fit.groupby("source_file"):
             ticks = sorted(g["Tick"].astype(int).unique().tolist())
             if len(ticks) < 2:
                 continue
@@ -142,16 +171,16 @@ def fit_models(
             arr = np.array(inter_list, dtype=float)
             tender_block["interarrival_ticks"] = _subsample(arr, EMPIRICAL_CAP, rng)
 
-        if "Action" in tenders.columns:
-            s = tenders["Action"].astype(str).str.upper()
+        if "Action" in tenders_fit.columns:
+            s = tenders_fit["Action"].astype(str).str.upper()
             buy_frac = float(s.str.contains("BUY").mean()) if len(s) else 0.5
             tender_block["action_buy_fraction"] = max(0.05, min(0.95, buy_frac))
 
         for tkr in BOOK_TICKERS:
             tg = (
-                tenders[tenders["Ticker"].astype(str) == tkr]
-                if "Ticker" in tenders.columns
-                else tenders.iloc[0:0]
+                tenders_fit[tenders_fit["Ticker"].astype(str) == tkr]
+                if "Ticker" in tenders_fit.columns
+                else tenders_fit.iloc[0:0]
             )
             if tg.empty:
                 continue
@@ -169,14 +198,15 @@ def fit_models(
                 px = tg["Price"].to_numpy(dtype=float)
                 ok = np.isfinite(mid) & np.isfinite(px) & (mid > 0)
                 spread_pct = np.abs(mid[ok] - px[ok]) / mid[ok]
+                spread_pct = spread_pct[spread_pct <= 0.20]
                 fit_sp = _fit_lognorm(spread_pct)
                 if fit_sp:
                     tender_spread_lognorm[tkr] = fit_sp
 
         n_sess = int(book["source_file"].nunique()) if not book.empty else 0
         if n_sess <= 0:
-            n_sess = int(tenders["source_file"].nunique()) if "source_file" in tenders.columns else 1
-        ticks_with = int(tenders.groupby("source_file")["Tick"].nunique().sum())
+            n_sess = int(tenders_fit["source_file"].nunique()) if "source_file" in tenders_fit.columns else 1
+        ticks_with = int(tenders_fit.groupby("source_file")["Tick"].nunique().sum())
         tender_block["prob_tick_empirical"] = min(
             0.99, max(0.001, ticks_with / (n_sess * 300.0))
         )

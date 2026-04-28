@@ -21,17 +21,20 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
+from common_helpers import get_last_trade_price, get_mid_price, style_worksheet, wait_for_session_start
+from runtime_config import load_runtime_config
 from sdk import RITError, RotmanSDK
 from utilities import ActionEnum, OrderType
 
 
 # Config
-API_KEY = "TPIAOJIF"
-HOST = "http://192.168.64.9:9999/v1"
+_RUNTIME = load_runtime_config()
+API_KEY = _RUNTIME.api_key
+HOST = _RUNTIME.host
 
 THRESHOLD = 0.01          # accept if (mid - tender_price) / mid > 2%
 POLL_INTERVAL_SEC = 0.5   # poll faster than logger — tenders can be short-lived
-MAX_SESSIONS = 3          # set to None to run forever
+MAX_SESSIONS = 10          # set to None to run forever
 STOPPED_WAIT_TIMEOUT = 700
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "agent_logs"
@@ -55,8 +58,16 @@ class TenderRecord:
     quantity: int
     tender_price: float
     mid_price: float
-    edge: float       # (mid - tender_price) / mid
+    edge: float       # BUY: (mid - tender)/mid, SELL: (tender - mid)/mid
     decision: str     # "ACCEPTED" or "DECLINED"
+    bid_depth_total: int = 0
+    ask_depth_total: int = 0
+    n_bid_levels: int = 0
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    estimated_slippage: float = 0.0
+    book_covers_full_qty: bool = False
+    unwind_method: str = ""
     fill_price: float = 0.0    # actual unwind price (avg)
     pnl: float = 0.0           # realised P&L from this tender
     residual: int = 0          # shares left unhedged after unwind
@@ -77,20 +88,7 @@ class SessionStats:
 
 
 def _style_ws(ws, n_cols: int) -> None:
-    for col in range(1, n_cols + 1):
-        cell = ws.cell(row=1, column=col)
-        cell.font = Font(name="Arial", bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", start_color="1F4E79")
-        cell.alignment = Alignment(horizontal="center")
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        fill = PatternFill("solid", start_color="D6E4F0") if row_idx % 2 == 0 else None
-        for cell in row:
-            cell.font = Font(name="Arial", size=10)
-            if fill:
-                cell.fill = fill
-    for col in ws.columns:
-        max_len = max((len(str(c.value)) if c.value is not None else 0) for c in col)
-        ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 2, 10), 35)
+    style_worksheet(ws, n_cols=n_cols, max_col_width=35)
 
 
 
@@ -102,8 +100,9 @@ class ReactiveAgent:
     Reactive tender agent for RIT LT3.
 
     Decision rule:
-        edge = (mid_price - tender_price) / mid_price
-        Accept if edge > threshold  (tender asks us to BUY cheap)
+        BUY tender:  edge = (mid_price - tender_price) / mid_price
+        SELL tender: edge = (tender_price - mid_price) / mid_price
+        Accept if edge > threshold
 
     Unwind:
         After accepting a BUY tender  → sell the position with market orders
@@ -121,19 +120,71 @@ class ReactiveAgent:
 
     def _get_mid(self, ticker: str) -> float | None:
         """Return mid-price for ticker from current securities snapshot."""
+        return get_mid_price(self.client, ticker)
+
+    @staticmethod
+    def _level_avail(level) -> int:
+        return int(getattr(level, "quantity_remaining", 0) or getattr(level, "quantity", 0) or 0)
+
+    def _get_last_trade_price(self, ticker: str) -> float:
+        """Best-effort last traded price from securities endpoint."""
+        return get_last_trade_price(self.client, ticker)
+
+    def _snapshot_book_metrics(
+        self, ticker: str, quantity: int, action_str: str
+    ) -> tuple[int, int, int, float, float, float, bool]:
+        """Return depth totals/top-of-book/slippage coverage snapshot at eval time."""
         try:
-            secs = self.client.get_securities(ticker=ticker)
-            if not secs:
-                return None
-            sec = secs[0] if isinstance(secs, list) else secs
-            bid = float(sec.get("bid") or sec.get("bidPrice") or 0)
-            ask = float(sec.get("ask") or sec.get("askPrice") or 0)
-            if bid > 0 and ask > 0:
-                return (bid + ask) / 2
-            return None
+            book = self.client.get_securities_book(ticker, limit=20)
         except Exception as e:
-            print(f"  [warn] _get_mid({ticker}): {e}", flush=True)
-            return None
+            print(f"  [warn] book snapshot failed for {ticker}: {e}", flush=True)
+            return 0, 0, 0, 0.0, 0.0, 0.0, False
+
+        bids = sorted(book.bids, key=lambda x: float(x.price), reverse=True)
+        asks = sorted(book.asks, key=lambda x: float(x.price))
+
+        bid_depth_total = sum(self._level_avail(l) for l in bids[:20])
+        ask_depth_total = sum(self._level_avail(l) for l in asks[:20])
+        n_bid_levels = sum(1 for l in bids[:20] if self._level_avail(l) > 0)
+        best_bid = float(bids[0].price) if bids else 0.0
+        best_ask = float(asks[0].price) if asks else 0.0
+
+        unwind_sell = "BUY" in action_str  # accepted BUY tender -> we SELL to unwind
+        remaining = quantity
+        estimated_slippage = 0.0
+        if unwind_sell:
+            for lvl in bids[:20]:
+                px = float(lvl.price)
+                av = self._level_avail(lvl)
+                if av <= 0:
+                    continue
+                take = min(remaining, av)
+                estimated_slippage += max(0.0, best_bid - px) * take
+                remaining -= take
+                if remaining <= 0:
+                    break
+        else:
+            for lvl in asks[:20]:
+                px = float(lvl.price)
+                av = self._level_avail(lvl)
+                if av <= 0:
+                    continue
+                take = min(remaining, av)
+                estimated_slippage += max(0.0, px - best_ask) * take
+                remaining -= take
+                if remaining <= 0:
+                    break
+
+        book_covers_full_qty = remaining <= 0
+        return (
+            bid_depth_total,
+            ask_depth_total,
+            n_bid_levels,
+            best_bid,
+            best_ask,
+            estimated_slippage,
+            book_covers_full_qty,
+        )
 
     # ------------------------------------------------------------------
     # Unwind
@@ -154,15 +205,18 @@ class ReactiveAgent:
             chunk = min(remaining, max_qty)
             try:
                 order = self.client.place_order(ticker, OrderType.MARKET, chunk, action)
-                # RIT market orders fill immediately; price comes back in order response
-                fill_price = float(
-                    order.get("price") or
-                    order.get("fill_price") or
-                    order.get("avg_price") or 0
-                )
-                if fill_price == 0:
-                    # Fallback: read mid after fill
-                    fill_price = self._get_mid(ticker) or 0
+                fill_price = float(order.get("price") or order.get("fill_price") or order.get("avg_price") or 0)
+                if fill_price <= 0:
+                    # RIT can return 0 for market orders. Retry from last trade, then mid.
+                    fill_price = self._get_last_trade_price(ticker)
+                    if fill_price <= 0:
+                        fill_price = self._get_mid(ticker) or 0.0
+                mid_now = self._get_mid(ticker) or 0.0
+                if mid_now > 0 and fill_price > 0 and abs(fill_price - mid_now) / mid_now > 0.05:
+                    print(
+                        f"    [warn] suspicious fill for {ticker}: fill={fill_price:.4f} mid={mid_now:.4f}",
+                        flush=True,
+                    )
                 total_value += fill_price * chunk
                 total_filled += chunk
                 remaining -= chunk
@@ -202,7 +256,21 @@ class ReactiveAgent:
             print(f"  [skip] tender {tender_id}: could not get mid for {ticker}", flush=True)
             return None
 
-        edge = (mid - tender_price) / mid
+        action_str = str(action_raw).upper()
+        if "BUY" in action_str:
+            edge = (mid - tender_price) / mid
+        else:
+            edge = (tender_price - mid) / mid
+
+        (
+            bid_depth_total,
+            ask_depth_total,
+            n_bid_levels,
+            best_bid,
+            best_ask,
+            estimated_slippage,
+            book_covers_full_qty,
+        ) = self._snapshot_book_metrics(ticker, int(quantity), action_str)
 
         print(
             f"  [tender {tender_id}] {ticker} | action={action_raw} | qty={quantity:,} | "
@@ -223,7 +291,6 @@ class ReactiveAgent:
 
             # Unwind: if tender had us BUY → we now hold long → SELL to unwind
             # If tender had us SELL → we are short → BUY to unwind
-            action_str = str(action_raw).upper()
             unwind_action = ActionEnum.SELL if "BUY" in action_str else ActionEnum.BUY
             avg_fill, residual = self._unwind(ticker, quantity, unwind_action)
 
@@ -244,7 +311,16 @@ class ReactiveAgent:
                 tick=tick, tender_id=tender_id, ticker=ticker,
                 action=action_str, quantity=quantity,
                 tender_price=tender_price, mid_price=mid, edge=round(edge, 6),
-                decision="ACCEPTED", fill_price=avg_fill,
+                decision="ACCEPTED",
+                bid_depth_total=bid_depth_total,
+                ask_depth_total=ask_depth_total,
+                n_bid_levels=n_bid_levels,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                estimated_slippage=estimated_slippage,
+                book_covers_full_qty=book_covers_full_qty,
+                unwind_method="market",
+                fill_price=avg_fill,
                 pnl=round(pnl, 4), residual=residual,
             )
         else:
@@ -260,6 +336,13 @@ class ReactiveAgent:
                 tick=tick, tender_id=tender_id, ticker=ticker,
                 action=str(action_raw).upper(), quantity=quantity,
                 tender_price=tender_price, mid_price=mid, edge=round(edge, 6),
+                bid_depth_total=bid_depth_total,
+                ask_depth_total=ask_depth_total,
+                n_bid_levels=n_bid_levels,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                estimated_slippage=estimated_slippage,
+                book_covers_full_qty=book_covers_full_qty,
                 decision="DECLINED",
             )
 
@@ -321,30 +404,7 @@ class ReactiveAgent:
 
 
 def _wait_for_session_start(client: RotmanSDK) -> bool:
-    print("Waiting for session start...", flush=True)
-    deadline = time.monotonic() + STOPPED_WAIT_TIMEOUT
-
-    case = client.get_case()
-    if case.get("status") == "ACTIVE":
-        print("  Sim is mid-session — waiting for STOP first...", flush=True)
-        while time.monotonic() < deadline:
-            if client.get_case().get("status") == "STOPPED":
-                print("  STOPPED — waiting for next ACTIVE...", flush=True)
-                break
-            time.sleep(1.0)
-        else:
-            return False
-
-    while time.monotonic() < deadline:
-        case = client.get_case()
-        status = case.get("status", "")
-        tick = int(case.get("tick", 0) or 0)
-        if status == "ACTIVE" and tick == 0:
-            print("  New session detected at tick 0.", flush=True)
-            return True
-        time.sleep(0.5)
-
-    return False
+    return wait_for_session_start(client=client, stopped_wait_timeout=STOPPED_WAIT_TIMEOUT)
 
 
 
@@ -381,7 +441,9 @@ def _write_session_xlsx(all_stats: list[SessionStats], out_path: Path) -> None:
     rec_headers = [
         "Session", "Tick", "Tender ID", "Ticker", "Action", "Quantity",
         "Tender Price", "Mid Price", "Edge", "Threshold",
-        "Decision", "Avg Unwind Price", "P&L", "Residual",
+        "Bid Depth Total", "Ask Depth Total", "N Bid Levels", "Best Bid", "Best Ask",
+        "Estimated Slippage", "Book Covers Full Qty",
+        "Decision", "Unwind Method", "Avg Unwind Price", "P&L", "Residual",
     ]
     ws_rec.append(rec_headers)
     for s in all_stats:
@@ -389,7 +451,9 @@ def _write_session_xlsx(all_stats: list[SessionStats], out_path: Path) -> None:
             ws_rec.append([
                 s.session, r.tick, r.tender_id, r.ticker, r.action, r.quantity,
                 r.tender_price, r.mid_price, r.edge, THRESHOLD,
-                r.decision, r.fill_price or "", r.pnl or "", r.residual or "",
+                r.bid_depth_total, r.ask_depth_total, r.n_bid_levels, r.best_bid, r.best_ask,
+                r.estimated_slippage, r.book_covers_full_qty,
+                r.decision, r.unwind_method or "", r.fill_price or "", r.pnl or "", r.residual or "",
             ])
     _style_ws(ws_rec, len(rec_headers))
     ws_rec.freeze_panes = "A2"

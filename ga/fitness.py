@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import json
+import time
 
 from synthetic.generator import BookSnapshot, SyntheticSessionGenerator, SyntheticTender
 
@@ -21,7 +23,7 @@ DEFAULT_MODEL = Path(__file__).resolve().parent.parent / "data" / "synthetic_mod
 RESIDUAL_PENALTY_RATE = 0.01
 
 _DEFAULT_FITNESS_PARAMS: dict[str, float] = {
-    "threshold": 0.01,
+    "threshold": 0.004,
     "market_order_ratio": 1.0,
     "time_decay_factor": 1.0,
     "slice_size_ratio": 1.0,
@@ -33,6 +35,29 @@ _CLIP_BOUNDS: dict[str, tuple[float, float]] = {
     "time_decay_factor": (0.5, 3.0),
     "slice_size_ratio": (0.2, 1.0),
 }
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "8cbd08",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(
+            Path(__file__).resolve().parent.parent / ".cursor" / "debug-8cbd08.log",
+            "a",
+            encoding="utf-8",
+        ) as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
 
 def _merged_params(params: dict[str, Any] | None) -> dict[str, float]:
@@ -47,10 +72,12 @@ def _merged_params(params: dict[str, Any] | None) -> dict[str, float]:
     return out
 
 
-def _edge(mid: float, tender_price: float) -> float:
+def _edge(mid: float, tender_price: float, action: str) -> float:
     if mid <= 0 or not np.isfinite(mid):
         return 0.0
-    return (mid - tender_price) / mid
+    if "BUY" in action.upper():
+        return (mid - tender_price) / mid
+    return (tender_price - mid) / mid
 
 
 def _visible_bid_volume(book: BookSnapshot) -> float:
@@ -109,7 +136,7 @@ def _accept_pnl(
 def _would_accept(book: BookSnapshot, t: SyntheticTender, threshold: float) -> bool:
     if not book.bids or not book.asks:
         return False
-    return _edge(book.mid(), t.price) > threshold
+    return _edge(book.mid(), t.price, t.action) > threshold
 
 
 def score_tender(book: BookSnapshot, t: SyntheticTender, params: dict[str, Any] | None) -> float:
@@ -166,17 +193,97 @@ def evaluate(
     (missing keys use defaults; values are clipped to valid ranges).
     """
     merged = _merged_params(params)
+    _debug_log(
+        "H1-H4",
+        "ga/fitness.py:evaluate:entry",
+        "evaluate start",
+        {
+            "n_sessions": n_sessions,
+            "base_seed": base_seed,
+            "params": merged,
+            "model_path": str(model_path or DEFAULT_MODEL),
+        },
+    )
     gen = SyntheticSessionGenerator(model_path or DEFAULT_MODEL)
     session_pnls: list[float] = []
     for si in range(n_sessions):
         pnl_sess = 0.0
+        tender_count = 0
+        buy_count = 0
+        sell_count = 0
+        accept_count = 0
+        accept_buy = 0
+        accept_sell = 0
+        edge_buy: list[float] = []
+        edge_sell: list[float] = []
+        accepted_pnls: list[float] = []
         for state in gen.iter_session(seed=base_seed + si):
             for t in state.tenders:
                 book = state.books.get(t.ticker)
                 if not book:
                     continue
-                pnl_sess += score_tender(book, t, merged)
+                tender_count += 1
+                is_buy = "BUY" in t.action.upper()
+                if is_buy:
+                    buy_count += 1
+                else:
+                    sell_count += 1
+                edge = _edge(book.mid(), t.price, t.action)
+                if is_buy:
+                    edge_buy.append(edge)
+                else:
+                    edge_sell.append(edge)
+                accepted = _would_accept(book, t, merged["threshold"])
+                if accepted:
+                    accept_count += 1
+                    if is_buy:
+                        accept_buy += 1
+                    else:
+                        accept_sell += 1
+                    pnl = _accept_pnl(
+                        book,
+                        t,
+                        merged["market_order_ratio"],
+                        merged["slice_size_ratio"],
+                        merged["time_decay_factor"],
+                    )
+                    accepted_pnls.append(float(pnl))
+                    pnl_sess += float(pnl)
         session_pnls.append(pnl_sess)
+        _debug_log(
+            "H1-H4",
+            "ga/fitness.py:evaluate:session",
+            "session stats",
+            {
+                "session_index": si,
+                "seed": base_seed + si,
+                "tender_count": tender_count,
+                "buy_count": buy_count,
+                "sell_count": sell_count,
+                "accept_count": accept_count,
+                "accept_buy": accept_buy,
+                "accept_sell": accept_sell,
+                "mean_edge_buy": float(np.mean(edge_buy)) if edge_buy else None,
+                "mean_edge_sell": float(np.mean(edge_sell)) if edge_sell else None,
+                "max_edge_buy": float(np.max(edge_buy)) if edge_buy else None,
+                "max_edge_sell": float(np.max(edge_sell)) if edge_sell else None,
+                "mean_accepted_pnl": float(np.mean(accepted_pnls)) if accepted_pnls else None,
+                "session_pnl": float(pnl_sess),
+            },
+        )
     if not session_pnls:
+        _debug_log(
+            "H1",
+            "ga/fitness.py:evaluate:exit",
+            "no sessions produced",
+            {"result": 0.0},
+        )
         return 0.0
-    return float(np.mean(session_pnls))
+    result = float(np.mean(session_pnls))
+    _debug_log(
+        "H1-H4",
+        "ga/fitness.py:evaluate:exit",
+        "evaluate done",
+        {"mean_session_pnl": result},
+    )
+    return result

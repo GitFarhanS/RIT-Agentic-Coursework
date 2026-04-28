@@ -8,6 +8,7 @@ increasing; spread is positive. Price bounds match LT3-style ranges from tests.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -177,11 +178,18 @@ class SyntheticSessionGenerator:
             spread_pct = max(_lognorm_rv(spr_p, rng), 1e-6)
         else:
             spread_pct = 0.01
-        if "BUY" in action.upper():
+        if action.upper() == "BUY":
             price = mid * (1.0 - spread_pct)
         else:
             price = mid * (1.0 + spread_pct)
         price = _clip_price(price, *self.price_bounds[tkr])
+        rel_dist = abs(price - mid) / mid if mid > 0 else float("inf")
+        if rel_dist >= 0.25:
+            warnings.warn(
+                f"Tender price far from mid for {tkr}: mid={mid:.4f}, price={price:.4f}, rel={rel_dist:.4f}",
+                RuntimeWarning,
+            )
+            assert rel_dist < 0.25, "Tender price deviates by >=25% from mid"
 
         self._tender_id += 1
         return [

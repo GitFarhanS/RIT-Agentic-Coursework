@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ import numpy as np
 from .fitness import DEFAULT_MODEL, evaluate
 
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
-    "threshold": (0.005, 0.10),
+    "threshold": (0.001, 0.05),
     "market_order_ratio": (0.0, 1.0),
     "time_decay_factor": (0.5, 3.0),
     "slice_size_ratio": (0.2, 1.0),
@@ -78,6 +79,7 @@ def run(
     generations: int = 20,
     pop_size: int = 30,
     base_seed: int = 42,
+    verbose: bool = True,
 ) -> dict[str, float]:
     """
     Run the GA; print progress; write ga/evolved_params.json.
@@ -89,8 +91,20 @@ def run(
     population = [_random_individual(rng) for _ in range(pop_size)]
     best_fitness_ever = float("-inf")
     best_params_ever: dict[str, float] | None = None
+    run_start = time.perf_counter()
+
+    if verbose:
+        print(
+            "Starting GA "
+            f"(generations={generations}, pop_size={pop_size}, "
+            f"sessions_per_eval=5, base_seed={base_seed})"
+        )
+        print(f"Using model: {mp}")
 
     for gen in range(generations):
+        gen_start = time.perf_counter()
+        if verbose:
+            print(f"\n[Generation {gen + 1}/{generations}] evaluating population...")
         fitnesses: list[float] = []
         for i, ind in enumerate(population):
             fit = evaluate(
@@ -100,6 +114,15 @@ def run(
                 base_seed=gen * 100 + i,
             )
             fitnesses.append(fit)
+            if verbose:
+                elapsed = time.perf_counter() - gen_start
+                avg_eval_s = elapsed / (i + 1)
+                remaining = pop_size - (i + 1)
+                eta_s = remaining * avg_eval_s
+                print(
+                    f"  - eval {i + 1:2d}/{pop_size}: fitness={fit:+.6f} "
+                    f"(elapsed={elapsed:.1f}s, eta={eta_s:.1f}s)"
+                )
 
         order = sorted(range(pop_size), key=lambda j: fitnesses[j], reverse=True)
         population = [population[j] for j in order]
@@ -111,10 +134,13 @@ def run(
             best_fitness_ever = gen_best_f
             best_params_ever = copy.deepcopy(gen_best)
 
-        print(
-            f"Gen {gen:2d}: best_fitness={gen_best_f:+.6f} | "
-            f"params={{{', '.join(f'{k}={gen_best[k]:.5f}' for k in GENE_ORDER)}}}"
-        )
+        if verbose:
+            gen_elapsed = time.perf_counter() - gen_start
+            print(
+                f"[Generation {gen + 1}/{generations}] done in {gen_elapsed:.1f}s | "
+                f"best_fitness={gen_best_f:+.6f} | "
+                f"params={{{', '.join(f'{k}={gen_best[k]:.5f}' for k in GENE_ORDER)}}}"
+            )
 
         if gen == generations - 1:
             break
@@ -141,6 +167,9 @@ def run(
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    print(f"\nWrote {OUTPUT_JSON}")
+    if verbose:
+        total_elapsed = time.perf_counter() - run_start
+        print(f"\nFinished GA in {total_elapsed:.1f}s")
+        print(f"Wrote {OUTPUT_JSON}")
 
     return {k: float(best_params_ever[k]) for k in GENE_ORDER}

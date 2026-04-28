@@ -59,10 +59,10 @@ def main() -> int:
             reason = "non-finite fitness"
     results.append(("1. Determinism", ok, reason))
 
-    # 2. Threshold gate (edge == threshold -> no accept)
+    # 2. Threshold gate (edge == threshold -> no accept), with threshold in GA bounds
     mid_target = 100.01
-    # Bid 100, ask 100.02 -> mid 100.01; tender price so (mid - p)/mid == 0.05 exactly
-    thr = 0.05
+    # Bid 100, ask 100.02 -> mid 100.01; tender price so (mid - p)/mid == 0.004 exactly
+    thr = 0.004
     tender_px = mid_target * (1.0 - thr)
     book = BookSnapshot(
         bids=[(100.0, 1_000.0)],
@@ -74,21 +74,21 @@ def main() -> int:
     r2 = "" if ok2 else f"expected 0 contribution, got {got!r}"
     results.append(("2. Threshold gate", ok2, r2))
 
-    # 3. BUY sign (price above best bid -> negative _accept_pnl)
-    book_buy = BookSnapshot(bids=[(10.0, 100.0)], asks=[(10.5, 100.0)])
-    t_buy = SyntheticTender(2, "CRZY", "BUY", 1, 11.0)
-    pnl_buy = _accept_pnl(book_buy, t_buy, 1.0, 1.0, 1.0)
-    ok3 = pnl_buy < 0
-    r3 = "" if ok3 else f"_accept_pnl={pnl_buy}, expected < 0"
-    results.append(("3. BUY sign (_accept_pnl)", ok3, r3))
+    # 3. BUY sign: tender_price < mid => positive edge => accept and positive pnl if tender < best_bid
+    book_buy = BookSnapshot(bids=[(10.0, 100.0)], asks=[(10.2, 100.0)])
+    t_buy = SyntheticTender(2, "CRZY", "BUY", 1, 9.9)
+    pnl_buy = score_tender(book_buy, t_buy, {**_FULL, "threshold": 0.004})
+    ok3 = pnl_buy > 0
+    r3 = "" if ok3 else f"BUY score_tender={pnl_buy}, expected > 0"
+    results.append(("3. BUY sign (score_tender accept+pnl)", ok3, r3))
 
-    # 4. SELL sign (price below best ask -> negative _accept_pnl)
-    book_sell = BookSnapshot(bids=[(9.5, 100.0)], asks=[(10.5, 100.0)])
-    t_sell = SyntheticTender(3, "CRZY", "SELL", 1, 10.0)
-    pnl_sell = _accept_pnl(book_sell, t_sell, 1.0, 1.0, 1.0)
-    ok4 = pnl_sell < 0
-    r4 = "" if ok4 else f"_accept_pnl={pnl_sell}, expected < 0"
-    results.append(("4. SELL sign (_accept_pnl)", ok4, r4))
+    # 4. SELL sign: tender_price > mid => positive edge => accept and positive pnl if tender > best_ask
+    book_sell = BookSnapshot(bids=[(9.8, 100.0)], asks=[(10.0, 100.0)])
+    t_sell = SyntheticTender(3, "CRZY", "SELL", 1, 10.1)
+    pnl_sell = score_tender(book_sell, t_sell, {**_FULL, "threshold": 0.004})
+    ok4 = pnl_sell > 0
+    r4 = "" if ok4 else f"SELL score_tender={pnl_sell}, expected > 0"
+    results.append(("4. SELL sign (score_tender accept+pnl)", ok4, r4))
 
     # 5. Monotonicity of accept count vs increasing threshold
     ok5 = True
