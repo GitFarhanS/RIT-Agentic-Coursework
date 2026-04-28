@@ -4,6 +4,10 @@ Aggregate RIT simulation logger xlsx files into CSVs for offline model fitting.
 Input layout matches logging/simulation_logger.py: sheets "By Tick", "Book {TICKER}",
 "Tenders". Files without any "Book *" sheet are skipped (e.g. reactive_agent-only logs).
 
+Loads each workbook with pd.ExcelFile and parses only the sheets that are needed
+(not every sheet in the file). Optional multiprocessing (--jobs) speeds up large
+directories (~3k files). Progress is shown with tqdm when available.
+
 Limitations (for reports): "By Tick" logs only the first tender per tick; books may repeat
 when best bid/ask are unchanged between logger polls; this aggregation does not reconstruct
 full market intent beyond logged depth.
@@ -12,11 +16,21 @@ full market intent beyond logged depth.
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+
+    def tqdm(iterable, **kwargs):  # type: ignore[no-redef]
+        return iterable
+
 
 BOOK_DEPTH = 20
 SESSION_RE = re.compile(r"simulation_run_s(\d+)_", re.I)
@@ -120,55 +134,84 @@ def _enrich_tenders_with_by_tick(
 
 
 def aggregate_file(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    xl = pd.read_excel(path, sheet_name=None, engine="openpyxl")
-    names = list(xl.keys())
-    book_names = _book_sheet_names(names)
-    if not book_names:
-        return pd.DataFrame(), pd.DataFrame()
+    """
+    Read one xlsx: inspect sheet names, then parse only By Tick, Book *, and Tenders.
+    """
+    with pd.ExcelFile(path, engine="openpyxl") as xls:
+        names = xls.sheet_names
+        book_names = _book_sheet_names(names)
+        if not book_names:
+            return pd.DataFrame(), pd.DataFrame()
 
-    source_file = path.name
-    session_index = _parse_session_index(path.name)
+        source_file = path.name
+        session_index = _parse_session_index(path.name)
 
-    by_tick = xl.get("By Tick")
-    if by_tick is not None and not isinstance(by_tick, pd.DataFrame):
-        by_tick = None
+        by_tick: pd.DataFrame | None = None
+        if "By Tick" in names:
+            by_tick = xls.parse("By Tick")
 
-    metrics: list[dict] = []
-    for bname in book_names:
-        ticker = bname.replace("Book ", "").strip()
-        df = xl[bname]
-        if df.empty or "Tick" not in df.columns:
-            continue
-        for _, row in df.iterrows():
-            m = _row_book_metrics(row, ticker)
-            m["source_file"] = source_file
-            m["session_index"] = session_index
-            m["tick_norm"] = float(m["tick"]) / 299.0
-            metrics.append(m)
+        metrics: list[dict] = []
+        for bname in book_names:
+            ticker = bname.replace("Book ", "").strip()
+            df = xls.parse(bname)
+            if df.empty or "Tick" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                m = _row_book_metrics(row, ticker)
+                m["source_file"] = source_file
+                m["session_index"] = session_index
+                m["tick_norm"] = float(m["tick"]) / 299.0
+                metrics.append(m)
 
-    book_df = pd.DataFrame(metrics)
+        book_df = pd.DataFrame(metrics)
 
-    tenders_raw = xl.get("Tenders")
-    if tenders_raw is None or not isinstance(tenders_raw, pd.DataFrame) or tenders_raw.empty:
-        tenders_out = pd.DataFrame(
-            columns=[
-                "Tick",
-                "Tender ID",
-                "Ticker",
-                "Action",
-                "Quantity",
-                "Price",
-                "Expires",
-                "source_file",
-                "mid_at_tick",
-                "spread_top_at_tick",
-            ]
-        )
+        if "Tenders" not in names:
+            tenders_out = pd.DataFrame(
+                columns=[
+                    "Tick",
+                    "Tender ID",
+                    "Ticker",
+                    "Action",
+                    "Quantity",
+                    "Price",
+                    "Expires",
+                    "source_file",
+                    "mid_at_tick",
+                    "spread_top_at_tick",
+                ]
+            )
+            return book_df, tenders_out
+
+        tenders_raw = xls.parse("Tenders")
+        if tenders_raw is None or tenders_raw.empty:
+            tenders_out = pd.DataFrame(
+                columns=[
+                    "Tick",
+                    "Tender ID",
+                    "Ticker",
+                    "Action",
+                    "Quantity",
+                    "Price",
+                    "Expires",
+                    "source_file",
+                    "mid_at_tick",
+                    "spread_top_at_tick",
+                ]
+            )
+            return book_df, tenders_out
+
+        tdf = tenders_raw.drop_duplicates(subset=["Tender ID"], keep="first")
+        tenders_out = _enrich_tenders_with_by_tick(tdf, by_tick, source_file)
         return book_df, tenders_out
 
-    tdf = tenders_raw.drop_duplicates(subset=["Tender ID"], keep="first")
-    tenders_out = _enrich_tenders_with_by_tick(tdf, by_tick, source_file)
-    return book_df, tenders_out
+
+def _aggregate_file_str(path_str: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Top-level worker entry for ProcessPoolExecutor (picklable)."""
+    return aggregate_file(Path(path_str))
+
+
+def _default_workers() -> int:
+    return min(8, max(1, mp.cpu_count() or 1))
 
 
 def main() -> None:
@@ -189,24 +232,48 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent / "data" / "aggregated_tenders.csv",
     )
+    p.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        default=None,
+        help="Parallel worker processes (default: min(8, CPU count); use 1 to disable)",
+    )
     args = p.parse_args()
+
+    jobs = args.jobs if args.jobs is not None else _default_workers()
+    jobs = max(1, jobs)
 
     files = sorted(args.input_dir.glob("*.xlsx"))
     if not files:
         print(f"No xlsx files in {args.input_dir}")
         return
 
+    paths_str = [str(f.resolve()) for f in files]
     book_parts: list[pd.DataFrame] = []
     tender_parts: list[pd.DataFrame] = []
     processed = 0
-    for f in files:
-        b, t = aggregate_file(f)
-        if b.empty:
-            continue
-        processed += 1
-        book_parts.append(b)
-        if not t.empty:
-            tender_parts.append(t)
+
+    if jobs == 1:
+        for path_str in tqdm(paths_str, desc="Aggregating", unit="file"):
+            b, t = _aggregate_file_str(path_str)
+            if b.empty:
+                continue
+            processed += 1
+            book_parts.append(b)
+            if not t.empty:
+                tender_parts.append(t)
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            futures = {ex.submit(_aggregate_file_str, ps): ps for ps in paths_str}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Aggregating", unit="file"):
+                b, t = fut.result()
+                if b.empty:
+                    continue
+                processed += 1
+                book_parts.append(b)
+                if not t.empty:
+                    tender_parts.append(t)
 
     args.output_book.parent.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +293,7 @@ def main() -> None:
         pd.DataFrame().to_csv(args.output_tenders, index=False)
         print(f"No tenders; wrote empty {args.output_tenders}")
 
-    print(f"Files with book data: {processed} / {len(files)}")
+    print(f"Files with book data: {processed} / {len(files)} (workers={jobs})")
 
 
 if __name__ == "__main__":

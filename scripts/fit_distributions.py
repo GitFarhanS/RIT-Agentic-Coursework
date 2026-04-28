@@ -2,8 +2,12 @@
 Fit parametric / empirical distributions from aggregated_book_stats.csv and
 aggregated_tenders.csv; write data/synthetic_model_params.json for the generator.
 
-Uses scipy MLE for lognormal (positive volumes, price gaps, spreads). Empirical
-samples (capped) for tender inter-arrival, quantities, and prices.
+Uses scipy MLE for lognormal (positive volumes, price gaps, spreads, tender
+spread_pct). Empirical samples (capped) for tender inter-arrival and quantities.
+
+Tender spread_pct per observed row: abs(mid_at_tick - Price) / mid_at_tick
+(from aggregated tenders merged with By Tick); fitted lognormal per ticker as
+tender_spread_lognorm — the generator sets tender price as mid * (1 ± spread_pct).
 """
 
 from __future__ import annotations
@@ -122,9 +126,10 @@ def fit_models(
     tender_block: dict[str, Any] = {
         "interarrival_ticks": [],
         "quantity_by_ticker": {t: [] for t in BOOK_TICKERS},
-        "price_by_ticker": {t: [] for t in BOOK_TICKERS},
         "action_buy_fraction": 0.5,
     }
+
+    tender_spread_lognorm: dict[str, Any] = {}
 
     if not tenders.empty and "source_file" in tenders.columns and "Tick" in tenders.columns:
         inter_list: list[int] = []
@@ -154,10 +159,19 @@ def fit_models(
                 tender_block["quantity_by_ticker"][tkr] = _subsample(
                     tg["Quantity"].to_numpy(dtype=float), EMPIRICAL_CAP, rng
                 )
-            if "Price" in tg.columns:
-                tender_block["price_by_ticker"][tkr] = _subsample(
-                    tg["Price"].to_numpy(dtype=float), EMPIRICAL_CAP, rng
-                )
+
+            if (
+                "Price" in tg.columns
+                and "mid_at_tick" in tg.columns
+                and not tg.empty
+            ):
+                mid = tg["mid_at_tick"].to_numpy(dtype=float)
+                px = tg["Price"].to_numpy(dtype=float)
+                ok = np.isfinite(mid) & np.isfinite(px) & (mid > 0)
+                spread_pct = np.abs(mid[ok] - px[ok]) / mid[ok]
+                fit_sp = _fit_lognorm(spread_pct)
+                if fit_sp:
+                    tender_spread_lognorm[tkr] = fit_sp
 
         n_sess = int(book["source_file"].nunique()) if not book.empty else 0
         if n_sess <= 0:
@@ -179,6 +193,7 @@ def fit_models(
         "price_gap_lognorm": gap_lognorm,
         "spread_top_lognorm": spread_lognorm,
         "depth_by_phase": depth_by_phase,
+        "tender_spread_lognorm": tender_spread_lognorm,
         "tender": tender_block,
     }
 
@@ -210,17 +225,18 @@ def add_defaults(model: dict[str, Any], rng: np.random.Generator) -> None:
             if side not in model["price_gap_lognorm"][tkr]:
                 model["price_gap_lognorm"][tkr][side] = {"shape": 0.5, "loc": 0.0, "scale": 0.02}
 
+    ts = model.setdefault("tender_spread_lognorm", {})
+    for tkr in BOOK_TICKERS:
+        cur = ts.get(tkr)
+        if cur is None or not isinstance(cur, dict) or "shape" not in cur:
+            ts[tkr] = {"shape": 0.6, "loc": 0.0, "scale": 0.015}
+
     t = model["tender"]
     if not t.get("interarrival_ticks"):
         t["interarrival_ticks"] = [5, 10, 20, 30, 50]
     for tkr in BOOK_TICKERS:
         if not t["quantity_by_ticker"].get(tkr):
             t["quantity_by_ticker"][tkr] = [1000.0, 2500.0, 5000.0, 10_000.0]
-        if not t["price_by_ticker"].get(tkr):
-            lo, hi = PRICE_BOUNDS[tkr]
-            t["price_by_ticker"][tkr] = _subsample(
-                np.linspace(lo, hi, num=50), EMPIRICAL_CAP, rng
-            )
 
 
 def main() -> None:

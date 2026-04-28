@@ -167,13 +167,21 @@ class SyntheticSessionGenerator:
             return []
 
         qty_pool = tcfg["quantity_by_ticker"].get(tkr) or [1000.0]
-        price_pool = tcfg["price_by_ticker"].get(tkr) or [mid]
         qty = int(max(1, rng.choice(np.array(qty_pool, dtype=float))))
-        price = float(rng.choice(np.array(price_pool, dtype=float)))
-        price = _clip_price(price, *self.price_bounds[tkr])
 
         buy_frac = float(tcfg.get("action_buy_fraction", 0.5))
         action = "BUY" if rng.random() < buy_frac else "SELL"
+
+        spr_p = (self.model.get("tender_spread_lognorm") or {}).get(tkr)
+        if spr_p and isinstance(spr_p, dict) and "shape" in spr_p:
+            spread_pct = max(_lognorm_rv(spr_p, rng), 1e-6)
+        else:
+            spread_pct = 0.01
+        if "BUY" in action.upper():
+            price = mid * (1.0 - spread_pct)
+        else:
+            price = mid * (1.0 + spread_pct)
+        price = _clip_price(price, *self.price_bounds[tkr])
 
         self._tender_id += 1
         return [
