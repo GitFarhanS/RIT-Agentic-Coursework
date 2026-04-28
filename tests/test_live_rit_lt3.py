@@ -100,10 +100,7 @@ def _available_tickers(client: RotmanSDK) -> set[str]:
     return {s.get("ticker") for s in secs if s.get("ticker")}
 
 
-# ---------------------------------------------------------------------------
 # TAME: at every price step in (15, 35), place+cancel BUY then place+cancel SELL
-# ---------------------------------------------------------------------------
-
 
 def test_live_tame_buy_every_price(live_client: RotmanSDK):
     """At every price in (15, 35), place then cancel a BUY."""
@@ -136,10 +133,7 @@ def test_live_tame_sell_every_price(live_client: RotmanSDK):
             raise
 
 
-# ---------------------------------------------------------------------------
 # CRZY: at every price step in (5, 20), place+cancel BUY then place+cancel SELL
-# ---------------------------------------------------------------------------
-
 
 def test_live_crzy_buy_and_sell_every_price(live_client: RotmanSDK):
     """At every price in (5, 20), place then cancel a BUY, then place then cancel a SELL."""
@@ -157,10 +151,7 @@ def test_live_crzy_buy_and_sell_every_price(live_client: RotmanSDK):
             raise
 
 
-# ---------------------------------------------------------------------------
 # Wait for tender then accept
-# ---------------------------------------------------------------------------
-
 
 def _wait_for_tender(client: RotmanSDK, timeout_sec: int = TENDER_WAIT_TIMEOUT, poll_interval: int = TENDER_POLL_INTERVAL):
     """Poll get_tenders() until at least one tender appears or timeout."""
@@ -185,10 +176,7 @@ def test_live_accept_tender(live_client: RotmanSDK):
     assert isinstance(result, dict)
 
 
-# ---------------------------------------------------------------------------
 # Wait for tender then decline
-# ---------------------------------------------------------------------------
-
 
 def test_live_decline_tender(live_client: RotmanSDK):
     """Wait for a tender to appear (up to ~5 min), then decline it."""
@@ -202,10 +190,7 @@ def test_live_decline_tender(live_client: RotmanSDK):
     assert isinstance(result, dict)
 
 
-# ---------------------------------------------------------------------------
 # Wait for new 5‑min period, then poll until we have seen all 300 ticks
-# ---------------------------------------------------------------------------
-
 
 def test_live_poll_all_300_ticks_in_period(live_client: RotmanSDK):
     """Wait for a round to become ACTIVE, then observe all 300 ticks in that period."""
@@ -295,10 +280,7 @@ def test_live_poll_all_300_ticks_in_period(live_client: RotmanSDK):
     )
     print(f"[done] observed all {ticks_per_period} ticks ✓", flush=True)
 
-# ---------------------------------------------------------------------------
 # Test that the simulation has stopped
-# ---------------------------------------------------------------------------
-
 
 def test_live_simulation_stopped(live_client: RotmanSDK):
     """Poll get_case() until status is STOPPED (timeout ~6.5 min); assert we see STOPPED."""

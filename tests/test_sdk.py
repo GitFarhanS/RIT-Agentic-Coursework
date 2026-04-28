@@ -45,9 +45,7 @@ from sdk import RITError, RotmanSDK
 from utilities import ActionEnum, OrderType
 
 
-# ---------------------------------------------------------------------------
 # Live client fixture
-# ---------------------------------------------------------------------------
 
 def _get_live_client():
     """Create SDK client from .env / env (RIT_API_KEY). Returns None if not set."""
@@ -78,10 +76,7 @@ def live_client():
     return _get_live_client()
 
 
-# ---------------------------------------------------------------------------
 # RITError (unit)
-# ---------------------------------------------------------------------------
-
 
 def test_rit_error_attributes():
     e = RITError("Bad request", status_code=400, code="BAD", wait=1.5)
@@ -98,10 +93,7 @@ def test_rit_error_optional_args():
     assert e.wait is None
 
 
-# ---------------------------------------------------------------------------
 # RotmanSDK init (unit)
-# ---------------------------------------------------------------------------
-
 
 def test_sdk_init_strips_trailing_slash():
     client = RotmanSDK(API_KEY="key1", HOST="http://host:9999/v1/")
@@ -116,10 +108,8 @@ def test_sdk_repr_str():
     assert "http://h/v1" in str(client)
 
 
-# ---------------------------------------------------------------------------
-# Validation (unit, no network)
-# ---------------------------------------------------------------------------
 
+# Validation (unit, no network)
 
 def test_place_order_limit_requires_price():
     client = RotmanSDK(API_KEY="k", HOST="http://h/v1")
@@ -145,10 +135,7 @@ def test_cancel_orders_requires_one_option():
         client.cancel_orders()
 
 
-# ---------------------------------------------------------------------------
 # Live: Case & meta
-# ---------------------------------------------------------------------------
-
 
 def test_live_get_case(live_client):
     case = live_client.get_case()
@@ -175,10 +162,7 @@ def test_live_get_limits(live_client):
         assert isinstance(lim, dict)
 
 
-# ---------------------------------------------------------------------------
 # Live: Securities
-# ---------------------------------------------------------------------------
-
 
 def test_live_get_securities(live_client):
     secs = live_client.get_securities()
@@ -217,10 +201,7 @@ def test_live_get_positions(live_client):
         assert hasattr(p, "position") and hasattr(p, "ticker")
 
 
-# ---------------------------------------------------------------------------
 # Live: Orders (read-only + one round-trip)
-# ---------------------------------------------------------------------------
-
 
 def test_live_get_orders(live_client):
     orders = live_client.get_orders()
@@ -263,9 +244,7 @@ def test_live_place_and_cancel_order(live_client):
         assert isinstance(result, dict)
 
 
-# ---------------------------------------------------------------------------
 # Live: Tenders
-# ---------------------------------------------------------------------------
 
 # Poll interval when waiting for a tender (seconds)
 _TENDER_POLL_INTERVAL = 1
@@ -293,10 +272,7 @@ def test_live_get_tenders(live_client):
         assert hasattr(t, "id") and hasattr(t, "ticker")
 
 
-# ---------------------------------------------------------------------------
 # Live: Bulk cancel (no-op if no orders)
-# ---------------------------------------------------------------------------
-
 
 def test_live_kill_all(live_client):
     # Just ensure it doesn't raise; may cancel 0 orders

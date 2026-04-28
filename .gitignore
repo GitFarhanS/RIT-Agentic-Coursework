@@ -17,3 +17,9 @@ local_docs/
 local_files/
 .env
 VM files/
+
+# Logs, large binaries, GA output
+logging/simulation_logs/
+agents/agent_logs/
+ga/evolved_params.json
+.DS_Store
