@@ -48,13 +48,23 @@ class GAAgent(base.DeliberativeAgent):
         action: base.ActionEnum,
         qty: float,
         price: float,
+        unwind: base.UnwindState | None = None,
     ) -> list[int]:
         ids: list[int] = []
         remaining = int(qty)
         max_q = self._max_chunk(ticker)
         slice_q = max(1, int(max_q * float(SLICE_SIZE_RATIO)))
         while remaining > 0:
-            chunk = min(remaining, slice_q)
+            allowed = self._allowed_liability_qty(ticker, action, unwind=unwind)
+            if allowed <= 0:
+                print(
+                    f"    [liability-block] unwind-limit {action.value} {ticker}: no liability-backed qty available",
+                    flush=True,
+                )
+                break
+            chunk = min(remaining, slice_q, allowed)
+            if chunk <= 0:
+                break
             try:
                 od = self.client.place_order(ticker, base.OrderType.LIMIT, chunk, action, price=price)
                 oid = int(od.get("order_id") or od.get("id") or 0)
@@ -148,16 +158,18 @@ class GAAgent(base.DeliberativeAgent):
             slip = float("inf")
 
         spread_captured = abs(mid - tender_price) * quantity
-        txn_cost = quantity * 0.02
+        txn_cost = quantity * base.COMMISSION_PER_SHARE
         expected_pnl = spread_captured - slip - txn_cost
         risk_blocked = self._projected_exposure_breach(ticker, quantity, tender_is_buy)
-        accept = (edge > threshold) and (expected_pnl > 0) and (not risk_blocked)
+        liability_safe = book_covers_full_qty and math.isfinite(slip)
+        accept = (edge > threshold) and (expected_pnl > 0) and (not risk_blocked) and liability_safe
 
         print(
             f"  [tender {tender_id}] {ticker} | action={action_str} | qty={quantity:,} | "
             f"tender_price={tender_price:.4f} | mid={mid:.4f} | edge={edge:.4f} "
             f"(thr={threshold:.4f}) | slip~={slip:.2f} | spread_cap~={spread_captured:.2f} | "
-            f"txn={txn_cost:.2f} | E[pnl]~={expected_pnl:.2f} | risk_block={risk_blocked}",
+            f"txn={txn_cost:.2f} | E[pnl]~={expected_pnl:.2f} | liab_safe={liability_safe} | "
+            f"risk_block={risk_blocked}",
             flush=True,
         )
 
@@ -166,7 +178,7 @@ class GAAgent(base.DeliberativeAgent):
                 self.client.decline_tender(tender_id)
             except RITError as e:
                 print(f"  [warn] decline_tender({tender_id}) failed: {e}", flush=True)
-            reason = "risk limit" if risk_blocked else "threshold/E[pnl] gate"
+            reason = "risk limit" if risk_blocked else "liability/threshold/E[pnl] gate"
             print(f"  [DECLINED] tender {tender_id} — {reason}", flush=True)
             return base.TenderRecord(
                 tick=tick,
@@ -235,21 +247,51 @@ def _write_session_xlsx(all_stats: list[base.SessionStats], out_path: Path) -> N
 
     ws_sum = wb.active
     ws_sum.title = "Summary"
-    sum_headers = ["Session", "Tenders Seen", "Accepted", "Declined", "Accept Rate", "Total P&L", "Params"]
+    sum_headers = [
+        "Session",
+        "Tenders Seen",
+        "Accepted",
+        "Declined",
+        "Accept Rate",
+        "Total Gross P&L",
+        "Total Net P&L",
+        "Params",
+    ]
     ws_sum.append(sum_headers)
     params_str = json.dumps(PARAMS, sort_keys=True)
     for s in all_stats:
         rate = f"{s.tenders_accepted / s.tenders_seen:.1%}" if s.tenders_seen else "0.0%"
         ws_sum.append(
-            [s.session, s.tenders_seen, s.tenders_accepted, s.tenders_declined, rate, round(s.total_pnl, 4), params_str]
+            [
+                s.session,
+                s.tenders_seen,
+                s.tenders_accepted,
+                s.tenders_declined,
+                rate,
+                round(s.total_gross_pnl, 4),
+                round(s.total_pnl, 4),
+                params_str,
+            ]
         )
     if len(all_stats) > 1:
-        total_pnl = sum(s.total_pnl for s in all_stats)
+        total_gross_pnl = sum(s.total_gross_pnl for s in all_stats)
+        total_net_pnl = sum(s.total_pnl for s in all_stats)
         total_seen = sum(s.tenders_seen for s in all_stats)
         total_acc = sum(s.tenders_accepted for s in all_stats)
         total_dec = sum(s.tenders_declined for s in all_stats)
         overall = f"{total_acc / total_seen:.1%}" if total_seen else "0.0%"
-        ws_sum.append(["TOTAL", total_seen, total_acc, total_dec, overall, round(total_pnl, 4), params_str])
+        ws_sum.append(
+            [
+                "TOTAL",
+                total_seen,
+                total_acc,
+                total_dec,
+                overall,
+                round(total_gross_pnl, 4),
+                round(total_net_pnl, 4),
+                params_str,
+            ]
+        )
         for cell in ws_sum[ws_sum.max_row]:
             cell.font = Font(name="Arial", bold=True)
     base._style_ws(ws_sum, len(sum_headers))
@@ -280,7 +322,11 @@ def _write_session_xlsx(all_stats: list[base.SessionStats], out_path: Path) -> N
         "Decision",
         "Unwind Method",
         "Avg Unwind Price",
-        "P&L",
+        "Gross P&L",
+        "Commission Cost",
+        "Liability Violation Volume",
+        "Liability Fine",
+        "Net P&L",
         "Residual",
         "Params",
     ]
@@ -314,6 +360,10 @@ def _write_session_xlsx(all_stats: list[base.SessionStats], out_path: Path) -> N
                     r.unwind_method or "",
                     r.fill_price or "",
                     r.pnl or "",
+                    r.commission_cost or "",
+                    r.liability_violation_volume or "",
+                    r.liability_fine or "",
+                    r.net_pnl or "",
                     r.residual or "",
                     params_str,
                 ]
@@ -366,7 +416,8 @@ def main() -> None:
             print(f"  Tenders seen:     {stats.tenders_seen}", flush=True)
             print(f"  Accepted:         {stats.tenders_accepted}", flush=True)
             print(f"  Declined:         {stats.tenders_declined}", flush=True)
-            print(f"  Total P&L:        {stats.total_pnl:+.4f}", flush=True)
+            print(f"  Total Gross P&L:  {stats.total_gross_pnl:+.4f}", flush=True)
+            print(f"  Total Net P&L:    {stats.total_pnl:+.4f}", flush=True)
 
     except KeyboardInterrupt:
         print("\nInterrupted — saving logs.", flush=True)
