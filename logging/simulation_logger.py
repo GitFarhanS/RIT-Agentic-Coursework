@@ -7,14 +7,22 @@ One xlsx file is produced per simulation run (in simulation_logs/).
 Tenders are observed and logged only — never accepted or declined.
 """
 
+from __future__ import annotations
+
+import sys
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from sdk import RotmanSDK
+from coursework.infrastructure.rotman_client import RotmanSDK
 
 # Config
 

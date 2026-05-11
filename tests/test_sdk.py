@@ -13,10 +13,12 @@ import sys
 import time
 from pathlib import Path
 
-# Ensure project root is on path so "sdk" and "utilities" import (pytest may run from different cwd)
+# Ensure src + project root on path so ``coursework`` and root shims resolve
 _root = Path(__file__).resolve().parent.parent
-if str(_root) not in sys.path:
-    sys.path.insert(0, str(_root))
+_src = _root / "src"
+for _p in (_src, _root):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 
 def _load_dotenv():

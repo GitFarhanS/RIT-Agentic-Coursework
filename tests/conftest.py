@@ -9,10 +9,13 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure project root is on path for "sdk" and "utilities"
+# Prefer src layout (``coursework`` package); keep root + agents for legacy shims.
 _root = Path(__file__).resolve().parent.parent
-if str(_root) not in sys.path:
-    sys.path.insert(0, str(_root))
+_src = _root / "src"
+_agents = _root / "agents"
+for _p in (_src, _root, _agents):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 
 def _load_dotenv():

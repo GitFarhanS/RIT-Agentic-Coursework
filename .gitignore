@@ -1,5 +1,6 @@
 pycache/
 __pycache__/
+*.egg-info/
 *.pyc
 *.pyo
 *.pyd
@@ -19,8 +20,7 @@ local_files/
 VM files/
 
 # Logs, large binaries, GA output
-logging/simulation_logs/
 agents/agent_logs/
-ga/evolved_params.json
 .DS_Store
-data/aggregated_book_stats.csv
+.cursor/
+data/rotman_uptime.json

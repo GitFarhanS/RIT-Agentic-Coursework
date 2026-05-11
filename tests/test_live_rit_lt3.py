@@ -11,7 +11,15 @@ TAME max quantity per order: 10,000. CRZY max quantity per order: 25,000.
 
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent.parent
+_src = _root / "src"
+for _p in (_src, _root):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 import pytest
 
