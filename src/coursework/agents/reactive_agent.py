@@ -45,6 +45,11 @@ MAX_ORDER_QTY: dict[str, int] = {
 }
 DEFAULT_MAX_QTY = 10_000  # fallback for unknown tickers
 
+# After accept_tender, wait for position to reflect the fill (RIT can lag).
+ACCEPT_SETTLE_SEC = 3.0
+ORDER_FILL_TIMEOUT = 2.0
+ORDER_FILL_POLL_SEC = 0.05
+
 
 # Data classes
 
@@ -132,9 +137,10 @@ class ReactiveAgent:
         Accept if edge > threshold
 
     Unwind:
-        After accepting a BUY tender  → sell the position with market orders
-        After accepting a SELL tender → buy  the position with market orders
-        Orders are chunked to respect per-ticker max order size.
+        Capture pre-accept baseline position, wait for the tender to settle on the
+        broker, then send market orders until position returns to baseline. Each
+        chunk is capped by remaining liability (current - baseline) and uses actual
+        filled size from the API (see deliberative pipeline). Per-ticker max order size still applies.
     """
 
     def __init__(self, client: RotmanSDK, threshold: float = THRESHOLD) -> None:
@@ -214,51 +220,121 @@ class ReactiveAgent:
         )
 
     # ------------------------------------------------------------------
-    # Unwind
+    # Position / unwind (baseline + liability, deliberative-style)
     # ------------------------------------------------------------------
 
-    def _unwind(self, ticker: str, quantity: int, action: ActionEnum) -> tuple[float, int]:
+    def _position(self, ticker: str) -> int:
+        """Net share position for ticker from securities snapshot."""
+        pos = self.client.get_positions().get(ticker)
+        if pos is None:
+            return 0
+        return int(pos.position)
+
+    def _wait_for_position_after_accept(
+        self, ticker: str, baseline: int, expected_delta: int
+    ) -> bool:
+        """Block until position == baseline + expected_delta or timeout."""
+        target = baseline + expected_delta
+        deadline = time.time() + ACCEPT_SETTLE_SEC
+        while time.time() < deadline:
+            if self._position(ticker) == target:
+                return True
+            time.sleep(ORDER_FILL_POLL_SEC)
+        return self._position(ticker) == target
+
+    @staticmethod
+    def _remaining_liability(baseline: int, cur: int) -> tuple[int, ActionEnum]:
+        """Shares and side to move from cur back to baseline (same rule as deliberative)."""
+        delta = cur - baseline
+        if delta == 0:
+            return 0, ActionEnum.SELL
+        if delta > 0:
+            return delta, ActionEnum.SELL
+        return -delta, ActionEnum.BUY
+
+    def _order_filled_qty(self, order_id: int, fallback: int) -> int:
+        """Poll broker until we know how many shares filled (market orders can report late)."""
+        deadline = time.time() + ORDER_FILL_TIMEOUT
+        while time.time() < deadline:
+            o = self.client.get_order(order_id)
+            if not o:
+                break
+            filled = int(o.get("quantity_filled") or 0)
+            remaining = int(o.get("quantity_remaining") or 0)
+            status = str(o.get("status") or "").upper()
+            if filled > 0:
+                return filled
+            if remaining == 0 or status in {"TRANSACTED", "CANCELLED", "REJECTED"}:
+                return filled
+            time.sleep(ORDER_FILL_POLL_SEC)
+        return fallback
+
+    def _fill_price_from_order(self, order: dict, order_id: int | None, ticker: str) -> float:
+        px = float(order.get("vwap") or order.get("price") or order.get("fill_price") or order.get("avg_price") or 0)
+        if px <= 0 and order_id is not None:
+            o2 = self.client.get_order(int(order_id)) or {}
+            px = float(o2.get("vwap") or o2.get("price") or 0.0)
+        if px <= 0:
+            px = self._get_last_trade_price(ticker)
+            if px <= 0:
+                px = self._get_mid(ticker) or 0.0
+        return px
+
+    def _unwind_to_baseline(self, ticker: str, baseline_pos: int) -> tuple[float, int, int]:
         """
-        Send market orders to unwind `quantity` shares in `action` direction.
-        Chunks orders to respect per-ticker max size.
-        Returns (avg_fill_price, residual_qty).
+        Market-only unwind until position == baseline_pos.
+        Returns (volume-weighted avg unwind price, total shares filled on unwind,
+        residual = abs(position - baseline) after attempt).
         """
         max_qty = MAX_ORDER_QTY.get(ticker, DEFAULT_MAX_QTY)
-        remaining = quantity
         total_value = 0.0
         total_filled = 0
 
-        while remaining > 0:
-            chunk = min(remaining, max_qty)
+        while True:
+            cur = self._position(ticker)
+            liab, side = self._remaining_liability(baseline_pos, cur)
+            if liab <= 0:
+                break
+            chunk = min(liab, max_qty)
             try:
-                order = self.client.place_order(ticker, OrderType.MARKET, chunk, action)
-                fill_price = float(order.get("price") or order.get("fill_price") or order.get("avg_price") or 0)
-                if fill_price <= 0:
-                    # RIT can return 0 for market orders. Retry from last trade, then mid.
-                    fill_price = self._get_last_trade_price(ticker)
-                    if fill_price <= 0:
-                        fill_price = self._get_mid(ticker) or 0.0
-                mid_now = self._get_mid(ticker) or 0.0
-                if mid_now > 0 and fill_price > 0 and abs(fill_price - mid_now) / mid_now > 0.05:
-                    print(
-                        f"    [warn] suspicious fill for {ticker}: fill={fill_price:.4f} mid={mid_now:.4f}",
-                        flush=True,
-                    )
-                total_value += fill_price * chunk
-                total_filled += chunk
-                remaining -= chunk
-                print(
-                    f"    [unwind] {action.value} {chunk} {ticker} @ {fill_price:.4f} "
-                    f"({remaining} remaining)",
-                    flush=True,
-                )
+                order = self.client.place_order(ticker, OrderType.MARKET, chunk, side)
             except RITError as e:
                 print(f"    [error] unwind order failed: {e}", flush=True)
                 break
-            time.sleep(0.1)  # brief pause between chunks
+
+            raw_filled = int(order.get("quantity_filled") or 0)
+            oid = order.get("order_id") or order.get("id")
+            filled = raw_filled
+            if filled <= 0 and oid is not None:
+                filled = self._order_filled_qty(int(oid), raw_filled)
+
+            if filled <= 0:
+                print(
+                    f"    [warn] unwind reported 0 fills for {ticker} {side.value} {chunk}; stopping",
+                    flush=True,
+                )
+                break
+
+            fill_price = self._fill_price_from_order(order, int(oid) if oid is not None else None, ticker)
+            mid_now = self._get_mid(ticker) or 0.0
+            if mid_now > 0 and fill_price > 0 and abs(fill_price - mid_now) / mid_now > 0.05:
+                print(
+                    f"    [warn] suspicious fill for {ticker}: fill={fill_price:.4f} mid={mid_now:.4f}",
+                    flush=True,
+                )
+            total_value += fill_price * filled
+            total_filled += filled
+            rem_liability = abs(self._position(ticker) - baseline_pos)
+            print(
+                f"    [unwind] {side.value} {filled}/{chunk} {ticker} @ {fill_price:.4f} "
+                f"(liability ~{rem_liability})",
+                flush=True,
+            )
+            time.sleep(0.1)
 
         avg_price = total_value / total_filled if total_filled > 0 else 0.0
-        return avg_price, remaining  # remaining = residual not filled
+        residual = abs(self._position(ticker) - baseline_pos)
+        return avg_price, total_filled, residual
 
     # ------------------------------------------------------------------
     # Tender decision
@@ -338,24 +414,37 @@ class ReactiveAgent:
         decision: TenderDecision,
         book: TenderBookMetrics,
     ) -> TenderRecord | None:
+        ticker = tender_input.ticker
+        qty = tender_input.quantity
+        is_buy_tender = "BUY" in tender_input.action_str
+        expected_delta = qty if is_buy_tender else -qty
+
+        baseline_pos = self._position(ticker)
+
         try:
             self.client.accept_tender(tender_input.tender_id)
         except RITError as e:
             print(f"  [error] accept_tender({tender_input.tender_id}) failed: {e}", flush=True)
             return None
 
+        settled = self._wait_for_position_after_accept(ticker, baseline_pos, expected_delta)
+        if not settled:
+            have = self._position(ticker)
+            want = baseline_pos + expected_delta
+            print(
+                f"  [warn] tender {tender_input.tender_id}: position settle timeout "
+                f"(have {have}, want {want}, baseline {baseline_pos}); unwinding actual liability",
+                flush=True,
+            )
+
         print(
-            f"  [ACCEPTED] tender {tender_input.tender_id} — unwinding "
-            f"{tender_input.quantity:,} {tender_input.ticker}",
+            f"  [ACCEPTED] tender {tender_input.tender_id} — unwinding to baseline {baseline_pos} "
+            f"on {ticker}",
             flush=True,
         )
-        avg_fill, residual = self._unwind(
-            tender_input.ticker,
-            tender_input.quantity,
-            decision.unwind_action,
-        )
+        avg_fill, unwind_fills, residual = self._unwind_to_baseline(ticker, baseline_pos)
 
-        filled_qty = tender_input.quantity - residual
+        filled_qty = min(unwind_fills, qty)
         pnl = self._realized_pnl(
             tender_input.action_str,
             tender_input.tender_price,
@@ -363,8 +452,8 @@ class ReactiveAgent:
             filled_qty,
         )
         print(
-            f"  [P&L] tender {tender_input.tender_id}: filled={filled_qty:,} residual={residual:,} "
-            f"avg_unwind={avg_fill:.4f} pnl={pnl:+.2f}",
+            f"  [P&L] tender {tender_input.tender_id}: unwind_fills={unwind_fills:,} "
+            f"residual_vs_baseline={residual:,} avg_unwind={avg_fill:.4f} pnl={pnl:+.2f}",
             flush=True,
         )
         return TenderRecord(
