@@ -1,6 +1,6 @@
 """
 Shared pytest configuration and fixtures for live RIT tests.
-Loads API key from .env (project root); adds project root to sys.path; provides live_client.
+Loads API key from .env (project root); adds ``src`` to sys.path when needed; provides live_client.
 """
 
 from __future__ import annotations
@@ -9,13 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-# Prefer src layout (``coursework`` package); keep root + agents for legacy shims.
+# Prefer src layout (``coursework`` package) when not installed editable.
 _root = Path(__file__).resolve().parent.parent
 _src = _root / "src"
-_agents = _root / "agents"
-for _p in (_src, _root, _agents):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 
 def _load_dotenv():
@@ -40,7 +38,7 @@ _load_dotenv()
 
 import pytest
 
-from sdk import RotmanSDK
+from coursework.infrastructure.rotman_client import RotmanSDK
 
 
 def _get_live_client():

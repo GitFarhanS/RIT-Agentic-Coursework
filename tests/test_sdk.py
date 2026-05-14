@@ -1,5 +1,5 @@
 """
-Tests for sdk.RotmanSDK and sdk.RITError.
+Tests for RotmanSDK and RITError (``coursework.infrastructure.rotman_client``).
 
 - Unit tests (no network): RITError, SDK init, validation (e.g. LIMIT price, cancel_orders args).
 - Live tests: use API key from .env (API_KEY or RIT_API_KEY); skip if unset or API unreachable.
@@ -13,12 +13,11 @@ import sys
 import time
 from pathlib import Path
 
-# Ensure src + project root on path so ``coursework`` and root shims resolve
+# Ensure src on path so ``coursework`` resolves when not installed editable
 _root = Path(__file__).resolve().parent.parent
 _src = _root / "src"
-for _p in (_src, _root):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 
 def _load_dotenv():
@@ -43,8 +42,8 @@ _load_dotenv()
 
 import pytest
 
-from sdk import RITError, RotmanSDK
-from utilities import ActionEnum, OrderType
+from coursework.domain.models import ActionEnum, OrderType
+from coursework.infrastructure.rotman_client import RITError, RotmanSDK
 
 
 # Live client fixture

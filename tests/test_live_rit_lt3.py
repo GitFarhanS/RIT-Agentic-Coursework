@@ -17,14 +17,13 @@ from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent
 _src = _root / "src"
-for _p in (_src, _root):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 import pytest
 
-from sdk import RITError, RotmanSDK
-from utilities import ActionEnum, OrderType
+from coursework.domain.models import ActionEnum, OrderType
+from coursework.infrastructure.rotman_client import RITError, RotmanSDK
 
 # LT3 price ranges (min, max) exclusive: CRZY (5, 20), TAME (15, 35)
 CRZY_PRICE_MIN, CRZY_PRICE_MAX = 5.01, 19.99

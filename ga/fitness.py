@@ -1,6 +1,6 @@
 """
 Offline fitness for GA / search: expected session P&L under a threshold tender rule
-on synthetic books (same edge definition as agents/reactive_agent.py).
+on synthetic books (same edge definition as coursework.agents.reactive_agent).
 
 Unwind P&L uses two tranches (best vs one level worse), slice-limited fillable size,
 and a residual inventory penalty scaled by time_decay_factor.

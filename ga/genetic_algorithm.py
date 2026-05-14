@@ -1,6 +1,8 @@
 """
 Hand-rolled tournament genetic algorithm for real-valued parameters.
 Uses ga.fitness.evaluate; fully reproducible via a single numpy Generator (no global RNG).
+
+Run from repository root: ``python -m ga.genetic_algorithm``
 """
 
 from __future__ import annotations
@@ -279,3 +281,7 @@ def run(
         print(f"Wrote {OUTPUT_JSON}")
 
     return {k: float(best_params_ever[k]) for k in GENE_ORDER}
+
+
+if __name__ == "__main__":
+    run()

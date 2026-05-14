@@ -24,3 +24,4 @@ agents/agent_logs/
 .DS_Store
 .cursor/
 data/rotman_uptime.json
+scripts/

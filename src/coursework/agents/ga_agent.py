@@ -7,7 +7,9 @@ mutation) and adds an edge-threshold pre-screen on tender evaluation.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -212,6 +214,16 @@ def _write_xlsx(all_stats: list[SessionStats], out_path: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="GA-driven deliberative LT3 agent")
+    parser.add_argument(
+        "--match-anchors",
+        type=Path,
+        metavar="DIR",
+        default=None,
+        help="Before each session, wait until tick 0 matches DIR/r_<session>.json from a reactive run",
+    )
+    args = parser.parse_args()
+
     print(f"[GA] params: {PARAMS}", flush=True)
     runtime = load_runtime_config()
     client = RotmanSDK(API_KEY=runtime.api_key, HOST=runtime.host)
@@ -219,6 +231,7 @@ def main() -> None:
     st = agent.settings
     all_stats: list[SessionStats] = []
     session = 0
+    match_timeout = float(os.environ.get("RIT_ANCHOR_MATCH_TIMEOUT", "1200"))
 
     try:
         while st.max_sessions is None or session < st.max_sessions:
@@ -229,7 +242,23 @@ def main() -> None:
                 f"slice={SLICE_SIZE_RATIO} edge_thr={EDGE_THRESHOLD}\n{'=' * 60}",
                 flush=True,
             )
-            if not wait_for_session_start(client=client, stopped_wait_timeout=st.stopped_timeout):
+            if args.match_anchors is not None:
+                from coursework.agents.session_pairing import load_fingerprint, wait_for_matched_session_start
+
+                anchor_path = args.match_anchors / f"r_{session}.json"
+                if not anchor_path.is_file():
+                    print(f"[pairing] missing anchor file {anchor_path} — run reactive with --save-anchors first.")
+                    break
+                target = load_fingerprint(anchor_path)
+                if not wait_for_matched_session_start(
+                    client,
+                    target,
+                    stopped_wait_timeout=st.stopped_timeout,
+                    match_timeout_sec=match_timeout,
+                ):
+                    print(f"Timed out waiting for matching scenario for session {session}.")
+                    break
+            elif not wait_for_session_start(client=client, stopped_wait_timeout=st.stopped_timeout):
                 print(f"Timed out waiting for session {session}.")
                 break
             stats = agent.run_session(session)

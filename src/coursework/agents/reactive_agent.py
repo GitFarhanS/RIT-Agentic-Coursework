@@ -13,6 +13,7 @@ to both stdout and an xlsx file in agent_logs/.
 
 from __future__ import annotations
 
+import argparse
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,7 +35,7 @@ HOST = _RUNTIME.host
 
 THRESHOLD = 0.01          # accept if (mid - tender_price) / mid > 2%
 POLL_INTERVAL_SEC = 0.5   # poll faster than logger — tenders can be short-lived
-MAX_SESSIONS = 10          # set to None to run forever
+MAX_SESSIONS = 20          # set to None to run forever
 STOPPED_WAIT_TIMEOUT = 700
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "agent_logs"
@@ -686,6 +687,16 @@ def _write_session_xlsx(all_stats: list[SessionStats], out_path: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Reactive LT3 tender agent")
+    parser.add_argument(
+        "--save-anchors",
+        type=Path,
+        metavar="DIR",
+        default=None,
+        help="Write tick-0 scenario fingerprints to DIR/r_<session>.json for paired GA runs",
+    )
+    args = parser.parse_args()
+
     client = RotmanSDK(API_KEY=API_KEY, HOST=HOST)
     agent = ReactiveAgent(client, threshold=THRESHOLD)
     all_stats: list[SessionStats] = []
@@ -701,6 +712,14 @@ def main() -> None:
             if not _wait_for_session_start(client):
                 print(f"Timed out waiting for session {session}. Stopping.")
                 break
+
+            if args.save_anchors is not None:
+                from coursework.agents.session_pairing import capture_fingerprint_at_tick_zero, save_fingerprint
+
+                fp = capture_fingerprint_at_tick_zero(client)
+                anchor_path = args.save_anchors / f"r_{session}.json"
+                save_fingerprint(anchor_path, fp)
+                print(f"[pairing] saved tick-0 anchor {anchor_path}", flush=True)
 
             stats = agent.run_session(session)
             all_stats.append(stats)

@@ -15,7 +15,7 @@ class DeliberativeSettings:
     """Tunable parameters for the deliberative tender + unwind pipeline."""
 
     poll_interval: float = 0.5
-    max_sessions: int | None = 3
+    max_sessions: int | None = 17
     stopped_timeout: float = 700.0
     output_dir: Path = field(default_factory=_default_output_dir)
     read_retries: int = 3
