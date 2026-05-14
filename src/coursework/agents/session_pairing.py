@@ -3,9 +3,10 @@ Pair reactive and GA runs on the same RIT stochastic path (optional lab workflow
 
 RIT advances ``period`` every time a session completes; a GA session run *after*
 many reactive sessions therefore sees a different tender/book stream than
-``r_k`` even when file names suggest pairing. Coursework summary statistics
-(``scripts/summarize_live_results.py``) treat reactive and GA CSVs as
-*independent* batches unless you complete this replay workflow.
+``r_k`` even when file names suggest pairing. When anchors are \emph{not} used,
+paired interpretation is invalid. After completing the workflow below,
+``local_files/summarize_live_results.py`` analyses the twenty rows as
+\emph{matched} pairs (Wilcoxon signed-rank on GA$-$reactive terminal NLV).
 
 Workflow
 --------

@@ -114,20 +114,7 @@ class BrokerHelpers:
         return max(0, tp * tpp - ((period - 1) * tpp + tick))
 
 
-# =============================================================================
-# 4. LIABILITY CHECK
-# =============================================================================
-# remaining_liability():
-#   current_pos = my current position
-#   delta = current_pos - baseline_pos  ← where I was BEFORE the tender
-#
-#   if delta > 0 → I'm too long  → need to SELL delta shares
-#   if delta < 0 → I'm too short → need to BUY |delta| shares
-#   if delta = 0 → done 
-#
-# This is the core rule: never trade past the baseline.
-# Every order checks this first.
-# =============================================================================
+# Liability: remaining_liability brings position back to baseline only.
 
 class LiabilityChecker(BrokerHelpers):
 
@@ -140,26 +127,13 @@ class LiabilityChecker(BrokerHelpers):
         delta = cur - u.baseline_pos
 
         if delta == 0:
-            return 0, u.side      # done ✅
+            return 0, u.side      # done
         if delta > 0:
             return delta, ActionEnum.SELL   # too long → sell
         return -delta, ActionEnum.BUY       # too short → buy
 
 
-# =============================================================================
-# 5. ORDER PLACEMENT
-# =============================================================================
-# market_to_target(want, side):
-#   while shares_still_needed > 0:
-#     check remaining liability (never exceed it)
-#     send market order for min(want, max_chunk, liability_left)
-#
-# post_passive(qty):
-#   check how much liability is left minus already-resting orders
-#   post limit order just inside the spread
-#   → if selling: just below ask
-#   → if buying:  just above bid
-# =============================================================================
+# Orders: market_to_target and post_passive stay within remaining liability.
 
 class OrderPlacer(LiabilityChecker):
 
@@ -270,22 +244,7 @@ class OrderPlacer(LiabilityChecker):
             rem -= chunk
 
 
-# =============================================================================
-# 6. UNWIND LIFECYCLE
-# =============================================================================
-# start_unwind():
-#   wait for position to update after tender accept
-#   send 60% of qty as immediate market orders  ← get most of it done fast
-#   post limit orders for remaining 40%         ← try to get better price
-#
-# pulse() (called every 0.5s):
-#   if fully unwound → cancel leftover orders, done
-#   if <60 ticks left → PANIC, send market orders for everything remaining
-#   if 10 ticks since last reprice → cancel limits, repost at fresh price
-#
-# reconcile_to_baseline():
-#   emergency cleanup → keep market-selling/buying until position = baseline
-# =============================================================================
+# Unwind: market/limit mix, pulse/panic/reprice, reconcile to baseline.
 
 class UnwindManager(OrderPlacer):
 
@@ -346,7 +305,7 @@ class UnwindManager(OrderPlacer):
         """
         rem, side = self.remaining_liability(u)
 
-        # Done ✅ → tidy up
+        # Done → tidy up
         if rem == 0:
             self.cancel_all_and_wait(u.ticker)
             return
@@ -418,20 +377,7 @@ class UnwindManager(OrderPlacer):
         self.cancel_all_and_wait(u.ticker)
 
 
-# =============================================================================
-# 7. TENDER EVALUATION (the decision engine)
-# =============================================================================
-# evaluate(tender):
-#   1. Is it expired?            → DECLINE
-#   2. Can we get a mid price?   → DECLINE if not
-#   3. Walk the order book to estimate slippage
-#   4. expected_pnl = spread_captured - slippage - commission
-#   5. Would this breach risk limits?      → DECLINE
-#   6. Is the book deep enough?            → DECLINE
-#   7. Is expected_pnl > 0?               → DECLINE if not
-#   If all checks pass → ACCEPT → start_unwind() → run_unwind_loop()
-#   Then calculate actual P&L and return the full record.
-# =============================================================================
+# Tenders: evaluate() gates then accept, unwind, record P&L.
 
 class TenderEvaluator(UnwindManager):
 
@@ -452,8 +398,8 @@ class TenderEvaluator(UnwindManager):
             slip += (ref_px - px) * take if sell_into_bids else (px - ref_px) * take
             rem  -= take
             if rem <= 0:
-                return slip, True   # fully covered ✅
-        return slip, False          # book too thin ❌
+                return slip, True   # fully covered
+        return slip, False          # book too thin
 
     def _risk_blocks(self, ticker: str, qty: int, is_buy: bool) -> bool:
         """Would accepting this tender breach our net or gross position limits?"""
@@ -500,13 +446,13 @@ class TenderEvaluator(UnwindManager):
             action=action, quantity=qty, tender_price=price,
         )
 
-        # --- Check 1: expired? ---
+        # Check 1: expired?
         if expiry - tick <= 0:
             self._safe_decline(int(tid))
             rec.decision, rec.decline_reason = "DECLINED", "expired"
             return rec
 
-        # --- Check 2: can we get a mid price? ---
+        # Check 2: can we get a mid price?
         mid = get_mid_price(self.client, ticker)
         if not mid:
             self._safe_decline(int(tid))
@@ -516,7 +462,7 @@ class TenderEvaluator(UnwindManager):
         rec.edge_signed = (mid - price) / mid
         rec.edge        = abs(rec.edge_signed)
 
-        # --- Check 3: can we read the book? ---
+        # Check 3: can we read the book?
         try:
             book = self.client.get_securities_book(ticker, limit=self.settings.book_depth)
         except RITError:
@@ -524,7 +470,7 @@ class TenderEvaluator(UnwindManager):
             rec.decision, rec.decline_reason = "DECLINED", "book error"
             return rec
 
-        # --- Check 4: is the book empty? ---
+        # Check 4: is the book empty?
         bids      = sorted(book.bids, key=lambda x: float(x.price), reverse=True)
         asks      = sorted(book.asks, key=lambda x: float(x.price))
         side_book = bids if is_buy else asks
@@ -542,7 +488,7 @@ class TenderEvaluator(UnwindManager):
         rec.expected_pnl       = rec.spread_captured - rec.estimated_slippage - rec.txn_cost
         rec.risk_blocked       = self._risk_blocks(ticker, qty, is_buy)
 
-        # --- Checks 5, 6, 7: risk / depth / profitability ---
+        # Checks 5, 6, 7: risk / depth / profitability
         reason = None
         if rec.risk_blocked:
             reason = "risk"
@@ -556,7 +502,7 @@ class TenderEvaluator(UnwindManager):
             rec.decision, rec.decline_reason = "DECLINED", reason
             return rec
 
-        # --- All checks passed → ACCEPT ---
+        # All checks passed → ACCEPT
         try:
             baseline_before = self.position(str(ticker))
             self.client.accept_tender(int(tid))
@@ -570,7 +516,7 @@ class TenderEvaluator(UnwindManager):
         u = self.start_unwind(int(tid), str(ticker), qty, price, is_buy, baseline_before)
         self._run_unwind_loop(u)
 
-        # --- Calculate actual P&L ---
+        # Calculate actual P&L
         avg_unwind             = (u.fills_value / u.fills_qty) if u.fills_qty else 0.0
         filled                 = min(u.fills_qty, qty)
         rec.gross_pnl          = (avg_unwind - price) * filled if is_buy else (price - avg_unwind) * filled

@@ -18,9 +18,9 @@ from coursework.domain.models import (
 )
 
 
-# ---------------------------------------------------------------------------
+
 # Errors
-# ---------------------------------------------------------------------------
+
 
 
 class RITError(Exception):
@@ -39,9 +39,9 @@ class RITError(Exception):
         self.wait = wait
 
 
-# ---------------------------------------------------------------------------
+
 # Client
-# ---------------------------------------------------------------------------
+
 
 
 class RotmanSDK:
@@ -71,7 +71,7 @@ class RotmanSDK:
     def __str__(self) -> str:
         return f"RotmanSDK({self.HOST})"
 
-    # ----- Low-level HTTP -----
+    # Low-level HTTP
 
     def _request(
         self,
@@ -117,7 +117,7 @@ class RotmanSDK:
     def _delete(self, endpoint: str) -> Any:
         return self._request("DELETE", endpoint)
 
-    # ----- Case & meta -----
+    # Case & meta
 
     def get_case(self) -> dict[str, Any]:
         """Get current case/session (name, tick, status, period, etc.)."""
@@ -138,7 +138,7 @@ class RotmanSDK:
         raw = self._get("/limits")
         return raw if isinstance(raw, list) else [raw] if raw else []
 
-    # ----- Securities -----
+    # Securities
 
     def get_securities(self, ticker: Optional[str] = None) -> list[dict[str, Any]]:
         """Get list of securities and associated positions (bid, ask, position, etc.)."""
@@ -168,14 +168,14 @@ class RotmanSDK:
         raw = self._get("/securities/tas", params={"ticker": ticker, "after": after, "period": period, "limit": limit})
         return raw if isinstance(raw, list) else []
 
-    # ----- Positions (convenience) -----
+    # Positions (convenience)
 
     def get_positions(self) -> dict[str, Position]:
         """Get positions per ticker (from securities), using British spelling unrealised/realised."""
         secs = self.get_securities()
         return {s["ticker"]: Position.from_api(s) for s in secs if s.get("ticker")}
 
-    # ----- Orders -----
+    # Orders
 
     def get_orders(
         self,
@@ -252,7 +252,7 @@ class RotmanSDK:
         """Cancel all open orders. Alias for cancel_orders(all=True)."""
         return self.cancel_orders(all=True)
 
-    # ----- Tenders -----
+    # Tenders
 
     def get_tenders(self) -> Optional[list[TenderOrder]]:
         """Get list of active tenders. Returns None if empty/unavailable."""

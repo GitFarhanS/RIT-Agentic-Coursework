@@ -1,6 +1,6 @@
 """
 Phase 1 — Reactive Agent
-------------------------
+
 Monitors tenders each tick and accepts if:
     (mid_price - tender_price) / mid_price > THRESHOLD
 
@@ -148,9 +148,9 @@ class ReactiveAgent:
         self.client = client
         self.threshold = threshold
 
-    # ------------------------------------------------------------------
+    
     # Mid-price
-    # ------------------------------------------------------------------
+    
 
     def _get_mid(self, ticker: str) -> float | None:
         """Return mid-price for ticker from current securities snapshot."""
@@ -220,9 +220,9 @@ class ReactiveAgent:
             book_covers_full_qty,
         )
 
-    # ------------------------------------------------------------------
+    
     # Position / unwind (baseline + liability, deliberative-style)
-    # ------------------------------------------------------------------
+    
 
     def _position(self, ticker: str) -> int:
         """Net share position for ticker from securities snapshot."""
@@ -337,9 +337,9 @@ class ReactiveAgent:
         residual = abs(self._position(ticker) - baseline_pos)
         return avg_price, total_filled, residual
 
-    # ------------------------------------------------------------------
+    
     # Tender decision
-    # ------------------------------------------------------------------
+    
 
     @staticmethod
     def _parse_tender_input(tender) -> TenderInput | None:
@@ -555,9 +555,9 @@ class ReactiveAgent:
             book=book,
         )
 
-    # ------------------------------------------------------------------
+    
     # Session loop
-    # ------------------------------------------------------------------
+    
 
     def run_session(self, session_num: int) -> SessionStats:
         """Run one full session (tick 0 → 299). Returns SessionStats."""

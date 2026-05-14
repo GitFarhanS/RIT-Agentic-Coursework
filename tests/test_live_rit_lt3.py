@@ -285,7 +285,7 @@ def test_live_poll_all_300_ticks_in_period(live_client: RotmanSDK):
         f"Expected to observe all {ticks_per_period} ticks (0..{ticks_per_period - 1}); "
         f"missing {len(missing)}: {sorted(missing)[:20]}{'...' if len(missing) > 20 else ''}"
     )
-    print(f"[done] observed all {ticks_per_period} ticks ✓", flush=True)
+    print(f"[done] observed all {ticks_per_period} ticks", flush=True)
 
 # Test that the simulation has stopped
 
